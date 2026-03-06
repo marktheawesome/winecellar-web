@@ -1,0 +1,15 @@
+version: "3.8"
+services:
+  winecellar-web:
+    build: .
+    container_name: winecellar-web
+    restart: unless-stopped
+    ports:
+      - 9168:80
+    environment:
+      - PG_HOST=${PG_HOST:-timescale}
+      - PG_PORT=${PG_PORT:-5432}
+      - PG_DATABASE=${PG_DATABASE:-winecellar}
+      - PG_USER=${PG_USER:-postgres}
+      - PG_PASSWORD=${PG_PASSWORD:-}
+networks: {}
