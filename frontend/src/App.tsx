@@ -1,18 +1,37 @@
 import { useState, useEffect, useCallback } from "react";
-import DevicePicker from "./components/DevicePicker";
-import TimeRangeSelector from "./components/TimeRangeSelector";
+import "./App.css";
 import ControlChart from "./components/ControlChart";
 import BoxWhiskerPlot from "./components/BoxWhiskerPlot";
 import HistogramChart from "./components/HistogramChart";
 import NelsonViolations from "./components/NelsonViolations";
 import { useRealtime } from "./hooks/useRealtime";
-import { getDevices, getSPCAnalysis, getExportCSVUrl, getLatestReading } from "./api/client";
-import type { DeviceInfo, SPCAnalysis, Metric, Bucket, Reading } from "./api/types";
+import {
+  getDevices,
+  getSPCAnalysis,
+  getExportCSVUrl,
+  getLatestReading,
+} from "./api/client";
+import type {
+  DeviceInfo,
+  SPCAnalysis,
+  Metric,
+  Bucket,
+  Reading,
+  ControlLimits,
+} from "./api/types";
 import type { GroupBy } from "./utils/stats";
-import { METRIC_LABELS } from "./api/types";
+import { METRIC_LABELS, BUCKET_LABELS } from "./api/types";
 import { format } from "date-fns";
 
-function defaultRange(): { start: string; end: string } {
+const PRESETS: { label: string; hours: number }[] = [
+  { label: "1h", hours: 1 },
+  { label: "6h", hours: 6 },
+  { label: "24h", hours: 24 },
+  { label: "7d", hours: 168 },
+  { label: "30d", hours: 720 },
+];
+
+function defaultRange() {
   const now = new Date();
   const s = new Date(now.getTime() - 6 * 3600_000);
   return { start: s.toISOString(), end: now.toISOString() };
@@ -25,97 +44,101 @@ function formatAge(iso: string, nowMs: number): string {
   return `${Math.round(ms / 3600_000)}h ago`;
 }
 
+function toLocalInput(iso: string): string {
+  try {
+    const d = new Date(iso);
+    const off = d.getTimezoneOffset();
+    return new Date(d.getTime() - off * 60000).toISOString().slice(0, 16);
+  } catch {
+    return "";
+  }
+}
+
+function fromLocalInput(local: string): string {
+  return new Date(local).toISOString();
+}
+
+function ChevronDown() {
+  return (
+    <svg viewBox="0 0 24 24" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  );
+}
+
 export default function App() {
-  // ---- State ----
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [devicesLoading, setDevicesLoading] = useState(true);
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
   const [metric, setMetric] = useState<Metric>("temp_f_cal");
   const [bucket, setBucket] = useState<Bucket>("auto");
   const [range, setRange] = useState(defaultRange);
+  const [activePreset, setActivePreset] = useState<number | null>(1);
   const [analysis, setAnalysis] = useState<SPCAnalysis | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [enabledRules, setEnabledRules] = useState<Set<number>>(
-    new Set()
-  );
+  const [enabledRules, setEnabledRules] = useState<Set<number>>(new Set());
   const [liveEnabled, setLiveEnabled] = useState(false);
   const [latestReading, setLatestReading] = useState<Reading | null>(null);
   const [nowMs, setNowMs] = useState(Date.now());
   const [distGroupBy, setDistGroupBy] = useState<GroupBy>("day");
   const [histBins, setHistBins] = useState(20);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
-  // ---- Real-time ----
-  const { newReadings, connected, lastMessage, clear } = useRealtime({
+  const { newReadings, connected, clear } = useRealtime({
     deviceId: selectedDevice,
     enabled: liveEnabled,
   });
 
-  // Merge live readings into analysis
   const mergedReadings: Reading[] =
     analysis && newReadings.length > 0
       ? [...analysis.readings, ...newReadings]
       : analysis?.readings ?? [];
 
-  // Track latest reading from live feed
   useEffect(() => {
-    if (newReadings.length > 0) {
+    if (newReadings.length > 0)
       setLatestReading(newReadings[newReadings.length - 1]);
-    }
   }, [newReadings]);
 
-  // ---- Fetch devices on mount ----
   useEffect(() => {
     getDevices()
       .then((d) => {
         setDevices(d);
-        if (d.length > 0 && !selectedDevice) {
-          setSelectedDevice(d[0].device_id);
-        }
+        if (d.length > 0 && !selectedDevice) setSelectedDevice(d[0].device_id);
       })
       .catch((e) => setError(e.message))
       .finally(() => setDevicesLoading(false));
   }, []);
 
-  // ---- Tick clock for relative age display ----
   useEffect(() => {
-    const interval = setInterval(() => setNowMs(Date.now()), 1000);
-    return () => clearInterval(interval);
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
   }, []);
 
-  // ---- Fetch latest reading when device changes ----
   useEffect(() => {
-    if (!selectedDevice) return;
-    getLatestReading(selectedDevice).then((r) => setLatestReading(r));
+    if (selectedDevice) getLatestReading(selectedDevice).then(setLatestReading);
   }, [selectedDevice]);
 
-  // ---- Poll latest reading every 10s ----
   useEffect(() => {
     if (!selectedDevice) return;
-    const interval = setInterval(() => {
-      getLatestReading(selectedDevice).then((r) => {
-        if (r) setLatestReading(r);
-      });
+    const id = setInterval(() => {
+      getLatestReading(selectedDevice).then((r) => { if (r) setLatestReading(r); });
     }, 10_000);
-    return () => clearInterval(interval);
+    return () => clearInterval(id);
   }, [selectedDevice]);
 
-  // ---- Fetch SPC analysis ----
   const fetchAnalysis = useCallback(async () => {
     if (!selectedDevice) return;
     setLoading(true);
     setError(null);
     clear();
     try {
-      const data = await getSPCAnalysis(
-        selectedDevice,
-        metric,
-        range.start,
-        range.end,
-        bucket,
-        Array.from(enabledRules)
+      setAnalysis(
+        await getSPCAnalysis(
+          selectedDevice, metric, range.start, range.end,
+          bucket, Array.from(enabledRules),
+        )
       );
-      setAnalysis(data);
     } catch (e: any) {
       setError(e.message);
       setAnalysis(null);
@@ -124,428 +147,349 @@ export default function App() {
     }
   }, [selectedDevice, metric, range.start, range.end, bucket, enabledRules, clear]);
 
-  // Auto-fetch when params change
-  useEffect(() => {
-    fetchAnalysis();
-  }, [fetchAnalysis]);
+  useEffect(() => { fetchAnalysis(); }, [fetchAnalysis]);
 
-  // ---- Handlers ----
   const toggleRule = (rule: number) => {
     setEnabledRules((prev) => {
       const next = new Set(prev);
-      if (next.has(rule)) next.delete(rule);
-      else next.add(rule);
+      next.has(rule) ? next.delete(rule) : next.add(rule);
       return next;
     });
   };
 
-  const handleExportCSV = () => {
-    if (!selectedDevice) return;
-    const url = getExportCSVUrl(selectedDevice, range.start, range.end, bucket);
-    window.open(url, "_blank");
+  const applyPreset = (hours: number, idx: number) => {
+    const now = new Date();
+    setRange({ start: new Date(now.getTime() - hours * 3600_000).toISOString(), end: now.toISOString() });
+    setActivePreset(idx);
   };
 
+  const handleExportCSV = () => {
+    if (!selectedDevice) return;
+    window.open(getExportCSVUrl(selectedDevice, range.start, range.end, bucket), "_blank");
+  };
+
+  const controlLimits = analysis?.control_limits ?? null;
+  const totalViolations = analysis?.total_violation_count ?? 0;
   const resolvedBucket = analysis?.resolved_bucket ?? null;
+  const deviceInfo = devices.find((d) => d.device_id === selectedDevice);
+
+  let status: "ok" | "warn" | "error" = "ok";
+  if (latestReading && controlLimits) {
+    const v = latestReading.temp_f_cal;
+    if (v > controlLimits.ucl_3sigma || v < controlLimits.lcl_3sigma) status = "error";
+    else if (v > controlLimits.ucl_2sigma || v < controlLimits.lcl_2sigma) status = "warn";
+  }
 
   return (
-    <div style={styles.app}>
-      {/* Header */}
-      <header style={styles.header}>
-        <div>
-          <h1 style={styles.h1}>Wine Cellar SPC Dashboard</h1>
-          <p style={styles.subtitle}>Statistical Process Control with Nelson Rules</p>
-        </div>
-
-        {/* Current reading display */}
-        {latestReading && (
-          <div style={styles.currentReadings}>
-            <div style={styles.currentCard}>
-              <span style={styles.currentLabel}>Temperature</span>
-              <span style={styles.currentTempValue}>
-                {latestReading.temp_f_cal.toFixed(1)}&deg;F
-              </span>
-              <span style={styles.currentTempSub}>
-                {latestReading.temp_c_cal.toFixed(1)}&deg;C
-              </span>
-            </div>
-            <div style={styles.currentCard}>
-              <span style={styles.currentLabel}>Humidity</span>
-              <span style={styles.currentRhValue}>
-                {latestReading.rh_cal.toFixed(1)}%
-              </span>
-            </div>
-            <div style={styles.currentCard}>
-              <span style={styles.currentLabel}>Updated</span>
-                <span style={styles.currentAge}>
-                {formatAge(latestReading.time_utc, nowMs)}
-                </span>
-              <span style={styles.currentTimestamp}>
-                {(() => {
-                  try { return format(new Date(latestReading.time_utc), "HH:mm:ss"); }
-                  catch { return ""; }
-                })()}
-              </span>
-            </div>
-          </div>
-        )}
-
-        <div style={styles.headerRight}>
-          {liveEnabled && (
-            <div style={styles.liveStatus}>
-              <span style={{
-                ...styles.liveDot,
-                backgroundColor: connected ? "#4ade80" : "#888",
-              }} />
-              <div>
-                <span style={{ color: connected ? "#4ade80" : "#888", fontSize: 11, fontWeight: 700, letterSpacing: 2 }}>
-                  {connected ? "LIVE" : "CONNECTING"}
-                </span>
-                {lastMessage && (
-                  <span style={styles.liveLastMsg}>Last: {lastMessage}</span>
-                )}
-                {newReadings.length > 0 && (
-                  <span style={styles.liveFeedCount}>+{newReadings.length} pts</span>
-                )}
-              </div>
-            </div>
-          )}
-          <button
-            style={{
-              ...styles.liveBtn,
-              ...(liveEnabled ? styles.liveBtnActive : {}),
-            }}
-            onClick={() => setLiveEnabled(!liveEnabled)}
-          >
-            {liveEnabled ? "Stop Live" : "Go Live"}
-          </button>
-        </div>
-      </header>
-
-      {/* Controls bar */}
-      <section style={styles.controls}>
-        <DevicePicker
-          devices={devices}
-          selected={selectedDevice}
-          onChange={setSelectedDevice}
-          loading={devicesLoading}
-        />
-
-        <div style={styles.metricGroup}>
-          <label style={styles.label}>Metric</label>
+    <>
+      {/* ── Top bar ── */}
+      <header className="topbar">
+        <div className="topbar-left">
+          <h1 className="logo">Wine<span>Cellar</span></h1>
           <select
-            style={styles.select}
-            value={metric}
-            onChange={(e) => setMetric(e.target.value as Metric)}
+            className="select"
+            value={selectedDevice ?? ""}
+            onChange={(e) => setSelectedDevice(e.target.value)}
+            disabled={devicesLoading}
           >
-            {(Object.entries(METRIC_LABELS) as [Metric, string][]).map(([k, v]) => (
-              <option key={k} value={k}>
-                {v}
-              </option>
+            <option value="" disabled>{devicesLoading ? "Loading..." : "Select device"}</option>
+            {devices.map((d) => (
+              <option key={d.device_id} value={d.device_id}>{d.device_id}</option>
             ))}
           </select>
         </div>
 
-        <TimeRangeSelector
-          start={range.start}
-          end={range.end}
-          bucket={bucket}
-          onRangeChange={(s, e) => setRange({ start: s, end: e })}
-          onBucketChange={setBucket}
-        />
+        <div className="topbar-right">
+          {liveEnabled && (
+            <span className="live-badge">
+              <span className={`live-dot ${connected ? "on" : "off"}`} />
+              <span style={{ color: connected ? "var(--green)" : "var(--text-4)" }}>
+                {connected ? "LIVE" : "..."}
+              </span>
+            </span>
+          )}
+          <button
+            className={`btn btn-live ${liveEnabled ? "active" : ""}`}
+            onClick={() => setLiveEnabled(!liveEnabled)}
+          >
+            {liveEnabled ? "Stop" : "Live"}
+          </button>
+        </div>
+      </header>
 
-        {/* Resolved aggregation badge */}
-        {resolvedBucket && (
-          <div style={styles.bucketBadgeGroup}>
-            <label style={styles.label}>Aggregation</label>
-            <span style={styles.bucketBadge}>{resolvedBucket}</span>
+      {/* ── Page ── */}
+      <main className="page">
+
+        {/* Error */}
+        {error && <div className="error-bar">Error: {error}</div>}
+
+        {/* Status */}
+        {latestReading && (
+          <div className={`status-bar ${status}`}>
+            <span className="status-dot" />
+            {status === "ok" && "All readings normal"}
+            {status === "warn" && "Approaching control limits"}
+            {status === "error" && "Outside control limits!"}
+            {totalViolations > 0 && (
+              <span style={{ marginLeft: "auto", fontSize: 13, opacity: 0.8 }}>
+                {totalViolations} violation{totalViolations !== 1 ? "s" : ""}
+              </span>
+            )}
           </div>
         )}
 
-        <div style={styles.actions}>
-          <button style={styles.refreshBtn} onClick={fetchAnalysis} disabled={loading}>
-            {loading ? "Loading..." : "Refresh"}
-          </button>
-          <button style={styles.csvBtn} onClick={handleExportCSV} disabled={!selectedDevice}>
-            Export CSV
-          </button>
-        </div>
-      </section>
+        {/* Hero cards */}
+        {latestReading ? (
+          <section className="hero">
+            <HeroCard
+              label="Temperature"
+              value={`${latestReading.temp_f_cal.toFixed(1)}\u00b0F`}
+              sub={`${latestReading.temp_c_cal.toFixed(1)}\u00b0C`}
+              colorClass="val-temp"
+            />
+            <HeroCard
+              label="Humidity"
+              value={`${latestReading.rh_cal.toFixed(1)}%`}
+              colorClass="val-humid"
+            />
+            <HeroCard
+              label="Dew Point"
+              value={`${latestReading.dew_point_f_cal.toFixed(1)}\u00b0F`}
+              colorClass="val-dew"
+            />
+            <HeroCard
+              label="Updated"
+              value={formatAge(latestReading.time_utc, nowMs)}
+              sub={safeFormat(latestReading.time_utc, "HH:mm:ss")}
+              colorClass="val-age"
+            />
+          </section>
+        ) : (
+          <div className="empty">
+            <h3>Waiting for data</h3>
+            <p>Select a device above to begin monitoring.</p>
+          </div>
+        )}
 
-      {/* Error */}
-      {error && (
-        <div style={styles.error}>
-          {error}
-        </div>
-      )}
-
-      {/* Main content */}
-      <div style={styles.main}>
-        <div style={styles.chartArea}>
-          <ControlChart
-            readings={mergedReadings}
-            controlLimits={analysis?.control_limits ?? null}
-            violations={analysis?.violations ?? []}
-            metric={metric}
-            enabledRules={enabledRules}
-          />
-          <div style={styles.distControls}>
-            <div style={styles.controlBlock}>
-              <label style={styles.label}>Box Group</label>
+        {/* ── Trend Chart Section ── */}
+        <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div className="section-head">
+            <h2 className="section-title">Trend</h2>
+            <div className="controls-row">
+              <div className="pill-group">
+                {PRESETS.map((p, i) => (
+                  <button
+                    key={p.label}
+                    className={`pill ${activePreset === i ? "active" : ""}`}
+                    onClick={() => applyPreset(p.hours, i)}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
               <select
-                style={styles.select}
-                value={distGroupBy}
-                onChange={(e) => setDistGroupBy(e.target.value as GroupBy)}
+                className="select"
+                value={metric}
+                onChange={(e) => setMetric(e.target.value as Metric)}
+                style={{ maxWidth: 180 }}
               >
-                <option value="range">All</option>
-                <option value="day">Day</option>
-                <option value="hour">Hour</option>
-              </select>
-            </div>
-            <div style={styles.controlBlock}>
-              <label style={styles.label}>Histogram Bins</label>
-              <select
-                style={styles.select}
-                value={histBins}
-                onChange={(e) => setHistBins(Number(e.target.value))}
-              >
-                {[10, 15, 20, 30, 40].map((n) => (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
+                {(Object.entries(METRIC_LABELS) as [Metric, string][]).map(([k, v]) => (
+                  <option key={k} value={k}>{v}</option>
                 ))}
               </select>
             </div>
           </div>
-          <div style={styles.distGrid}>
+
+          {/* Advanced settings drawer */}
+          <div className="settings-drawer">
+            <button
+              className={`settings-trigger ${advancedOpen ? "open" : ""}`}
+              onClick={() => setAdvancedOpen(!advancedOpen)}
+            >
+              <span>Advanced Settings</span>
+              <ChevronDown />
+            </button>
+            <div className={`settings-body ${advancedOpen ? "open" : ""}`}>
+              <div className="field">
+                <span className="field-label">From</span>
+                <input
+                  type="datetime-local"
+                  className="input"
+                  value={toLocalInput(range.start)}
+                  onChange={(e) => {
+                    setActivePreset(null);
+                    setRange({ start: fromLocalInput(e.target.value), end: range.end });
+                  }}
+                />
+              </div>
+              <div className="field">
+                <span className="field-label">To</span>
+                <input
+                  type="datetime-local"
+                  className="input"
+                  value={toLocalInput(range.end)}
+                  onChange={(e) => {
+                    setActivePreset(null);
+                    setRange({ start: range.start, end: fromLocalInput(e.target.value) });
+                  }}
+                />
+              </div>
+              <div className="field">
+                <span className="field-label">Aggregation</span>
+                <select
+                  className="select"
+                  value={bucket}
+                  onChange={(e) => setBucket(e.target.value as Bucket)}
+                >
+                  {(Object.entries(BUCKET_LABELS) as [Bucket, string][]).map(([k, v]) => (
+                    <option key={k} value={k}>{v}</option>
+                  ))}
+                </select>
+              </div>
+              {resolvedBucket && (
+                <div className="field">
+                  <span className="field-label">Resolved</span>
+                  <span className="badge badge-resolved">{resolvedBucket}</span>
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginLeft: "auto" }}>
+                <button className="btn btn-accent" onClick={fetchAnalysis} disabled={loading}>
+                  {loading ? "Loading..." : "Refresh"}
+                </button>
+                <button className="btn btn-sm" onClick={handleExportCSV} disabled={!selectedDevice}>
+                  Export CSV
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Chart */}
+          {loading ? (
+            <div className="loading"><div className="spin" /> Loading data...</div>
+          ) : (
+            <ControlChart
+              readings={mergedReadings}
+              controlLimits={controlLimits}
+              violations={analysis?.violations ?? []}
+              metric={metric}
+              enabledRules={enabledRules}
+            />
+          )}
+        </section>
+
+        {/* ── Distribution Section ── */}
+        <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div className="section-head">
+            <h2 className="section-title">Distribution</h2>
+            <div className="controls-row">
+              <div className="field">
+                <span className="field-label">Group</span>
+                <select
+                  className="select"
+                  value={distGroupBy}
+                  onChange={(e) => setDistGroupBy(e.target.value as GroupBy)}
+                >
+                  <option value="range">All</option>
+                  <option value="day">Day</option>
+                  <option value="hour">Hour</option>
+                </select>
+              </div>
+              <div className="field">
+                <span className="field-label">Bins</span>
+                <select
+                  className="select"
+                  value={histBins}
+                  onChange={(e) => setHistBins(Number(e.target.value))}
+                >
+                  {[10, 15, 20, 30, 40].map((n) => (
+                    <option key={n} value={n}>{n}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div className="two-up">
             <BoxWhiskerPlot readings={mergedReadings} metric={metric} groupBy={distGroupBy} />
             <HistogramChart readings={mergedReadings} metric={metric} bins={histBins} />
           </div>
-        </div>
-        <div style={styles.sidebar}>
+        </section>
+
+        {/* ── Nelson Rules Section ── */}
+        <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div className="section-head">
+            <h2 className="section-title">Nelson Rules</h2>
+            {totalViolations > 0 && (
+              <span className="badge badge-accent">
+                {totalViolations} violation{totalViolations !== 1 ? "s" : ""}
+              </span>
+            )}
+          </div>
           <NelsonViolations
             violations={analysis?.violations ?? []}
-            totalCount={analysis?.total_violation_count ?? 0}
+            totalCount={totalViolations}
             enabledRules={enabledRules}
             onToggleRule={toggleRule}
           />
-        </div>
-      </div>
+        </section>
+
+        {/* ── Device Info Footer ── */}
+        {deviceInfo && (
+          <section className="card">
+            <div className="card-head">
+              <span className="card-title">Device Info</span>
+            </div>
+            <div className="info-grid">
+              <InfoItem label="Device" value={deviceInfo.device_id} />
+              <InfoItem label="Readings" value={deviceInfo.total_readings.toLocaleString()} />
+              <InfoItem label="First Seen" value={safeFormat(deviceInfo.first_seen, "MMM d, yyyy")} />
+              <InfoItem label="Last Seen" value={safeFormat(deviceInfo.last_seen, "MMM d, HH:mm")} />
+              {controlLimits && (
+                <>
+                  <InfoItem label="Mean" value={controlLimits.mean.toFixed(2)} />
+                  <InfoItem label="Sigma" value={controlLimits.sigma.toFixed(4)} />
+                  <InfoItem label="UCL (3\u03c3)" value={controlLimits.ucl_3sigma.toFixed(2)} color="var(--red)" />
+                  <InfoItem label="LCL (3\u03c3)" value={controlLimits.lcl_3sigma.toFixed(2)} color="var(--red)" />
+                </>
+              )}
+            </div>
+          </section>
+        )}
+      </main>
+    </>
+  );
+}
+
+
+/* ===== Small helper components ===== */
+
+function HeroCard({
+  label, value, sub, colorClass,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  colorClass: string;
+}) {
+  return (
+    <div className="hero-card">
+      <span className="hero-label">{label}</span>
+      <span className={`hero-value ${colorClass}`}>{value}</span>
+      {sub && <span className="hero-sub">{sub}</span>}
     </div>
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
-  app: {
-    maxWidth: 1440,
-    margin: "0 auto",
-    padding: "16px 24px",
-    display: "flex",
-    flexDirection: "column",
-    gap: 16,
-    minHeight: "100vh",
-  },
-  header: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    borderBottom: "1px solid #222",
-    paddingBottom: 12,
-    gap: 16,
-    flexWrap: "wrap",
-  },
-  h1: { fontSize: 22, fontWeight: 700, color: "#e0e0e0" },
-  subtitle: { fontSize: 13, color: "#666", marginTop: 2 },
+function InfoItem({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div>
+      <div className="field-label">{label}</div>
+      <div className="info-val" style={color ? { color } : undefined}>{value}</div>
+    </div>
+  );
+}
 
-  /* Current reading cards */
-  currentReadings: {
-    display: "flex",
-    gap: 12,
-    alignItems: "stretch",
-  },
-  currentCard: {
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    gap: 2,
-    background: "#141414",
-    border: "1px solid #222",
-    borderRadius: 8,
-    padding: "8px 16px",
-    minWidth: 90,
-  },
-  currentLabel: {
-    fontSize: 10,
-    color: "#666",
-    textTransform: "uppercase" as const,
-    letterSpacing: 1,
-  },
-  currentTempValue: {
-    fontSize: 22,
-    fontWeight: 700,
-    fontFamily: "monospace",
-    color: "#818cf8",
-  },
-  currentTempSub: {
-    fontSize: 12,
-    color: "#666",
-    fontFamily: "monospace",
-  },
-  currentRhValue: {
-    fontSize: 22,
-    fontWeight: 700,
-    fontFamily: "monospace",
-    color: "#38bdf8",
-  },
-  currentAge: {
-    fontSize: 14,
-    fontWeight: 600,
-    color: "#e0e0e0",
-    fontFamily: "monospace",
-  },
-  currentTimestamp: {
-    fontSize: 11,
-    color: "#555",
-    fontFamily: "monospace",
-  },
-
-  /* Header right / live controls */
-  headerRight: { display: "flex", alignItems: "center", gap: 12 },
-  liveStatus: {
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-  },
-  liveDot: {
-    width: 8,
-    height: 8,
-    borderRadius: "50%",
-    flexShrink: 0,
-    animation: "pulse 2s ease-in-out infinite",
-  },
-  liveLastMsg: {
-    display: "block",
-    fontSize: 10,
-    color: "#555",
-  },
-  liveFeedCount: {
-    display: "block",
-    fontSize: 10,
-    color: "#818cf8",
-  },
-  liveBtn: {
-    padding: "6px 16px",
-    background: "#1a1a1a",
-    color: "#ccc",
-    border: "1px solid #333",
-    borderRadius: 6,
-    cursor: "pointer",
-    fontSize: 13,
-    fontWeight: 600,
-  },
-  liveBtnActive: {
-    background: "#16a34a",
-    color: "#fff",
-    borderColor: "#16a34a",
-  },
-
-  /* Controls bar */
-  controls: {
-    display: "flex",
-    flexWrap: "wrap",
-    alignItems: "flex-end",
-    gap: 16,
-    padding: 16,
-    background: "#141414",
-    border: "1px solid #222",
-    borderRadius: 8,
-  },
-  metricGroup: { display: "flex", flexDirection: "column", gap: 4 },
-  label: {
-    fontSize: 12,
-    color: "#888",
-    textTransform: "uppercase" as const,
-    letterSpacing: 1,
-  },
-  select: {
-    padding: "8px 12px",
-    background: "#1a1a1a",
-    color: "#e0e0e0",
-    border: "1px solid #333",
-    borderRadius: 6,
-    fontSize: 14,
-    cursor: "pointer",
-  },
-  bucketBadgeGroup: {
-    display: "flex",
-    flexDirection: "column",
-    gap: 4,
-  },
-  bucketBadge: {
-    display: "inline-block",
-    padding: "6px 14px",
-    background: "#1e1b4b",
-    color: "#a78bfa",
-    border: "1px solid #4c1d95",
-    borderRadius: 6,
-    fontSize: 13,
-    fontWeight: 600,
-    fontFamily: "monospace",
-    whiteSpace: "nowrap",
-  },
-  actions: { display: "flex", gap: 8, marginLeft: "auto" },
-  refreshBtn: {
-    padding: "8px 20px",
-    background: "#7c3aed",
-    color: "#fff",
-    border: "none",
-    borderRadius: 6,
-    cursor: "pointer",
-    fontSize: 13,
-    fontWeight: 600,
-  },
-  csvBtn: {
-    padding: "8px 16px",
-    background: "#1a1a1a",
-    color: "#ccc",
-    border: "1px solid #333",
-    borderRadius: 6,
-    cursor: "pointer",
-    fontSize: 13,
-  },
-  error: {
-    background: "#2d1111",
-    color: "#ef4444",
-    padding: 12,
-    borderRadius: 6,
-    border: "1px solid #442222",
-    fontSize: 13,
-  },
-  main: {
-    display: "grid",
-    gridTemplateColumns: "1fr 300px",
-    gap: 16,
-  },
-  chartArea: { minWidth: 0 },
-  sidebar: {},
-  distControls: {
-    display: "flex",
-    gap: 16,
-    alignItems: "flex-end",
-    marginTop: 16,
-    padding: "12px 16px",
-    background: "#141414",
-    border: "1px solid #222",
-    borderRadius: 8,
-  },
-  controlBlock: {
-    display: "flex",
-    flexDirection: "column",
-    gap: 4,
-  },
-  distGrid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
-    gap: 16,
-    marginTop: 12,
-  },
-};
+function safeFormat(iso: string, fmt: string): string {
+  try { return format(new Date(iso), fmt); }
+  catch { return iso; }
+}
