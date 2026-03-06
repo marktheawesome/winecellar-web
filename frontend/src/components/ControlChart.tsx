@@ -1,15 +1,7 @@
-import { useMemo, useCallback, useRef } from "react";
+import { useMemo, useCallback, useRef, useState, useEffect } from "react";
 import {
-  ComposedChart,
-  Line,
-  ReferenceLine,
-  Scatter,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Brush,
+  ComposedChart, Line, ReferenceLine, Scatter, XAxis, YAxis,
+  CartesianGrid, Tooltip, ResponsiveContainer, Brush,
 } from "recharts";
 import type { ControlLimits, Reading, NelsonViolation, Metric } from "../api/types";
 import { METRIC_LABELS, NELSON_RULE_COLORS } from "../api/types";
@@ -23,285 +15,115 @@ interface Props {
   enabledRules: Set<number>;
 }
 
-interface ChartPoint {
-  time: number;
-  timeLabel: string;
-  value: number;
-  [key: string]: number | string | null;
+interface ChartPoint { time: number; value: number; [k: string]: number | string | null; }
+
+const GRID = "#f1f5f9";
+const TICK = "#94a3b8";
+const TIP_BG = "#ffffff";
+const TIP_BD = "#e2e8f0";
+
+function useIsMobile(bp = 768) {
+  const [m, setM] = useState(window.innerWidth <= bp);
+  useEffect(() => { const h = () => setM(window.innerWidth <= bp); window.addEventListener("resize", h); return () => window.removeEventListener("resize", h); }, [bp]);
+  return m;
 }
 
-function formatTime(iso: string): string {
-  try {
-    return format(new Date(iso), "HH:mm:ss");
-  } catch {
-    return iso;
-  }
-}
+export default function ControlChart({ readings, controlLimits, violations, metric, enabledRules }: Props) {
+  const ref = useRef<HTMLDivElement>(null);
+  const mobile = useIsMobile();
 
-function formatTimeFull(iso: string): string {
-  try {
-    return format(new Date(iso), "yyyy-MM-dd HH:mm:ss");
-  } catch {
-    return iso;
-  }
-}
-
-export default function ControlChart({
-  readings,
-  controlLimits,
-  violations,
-  metric,
-  enabledRules,
-}: Props) {
-  const chartRef = useRef<HTMLDivElement>(null);
-
-  // Build violation index lookup: index -> list of rules
-  const violationMap = useMemo(() => {
-    const map = new Map<number, number[]>();
-    for (const v of violations) {
-      if (!enabledRules.has(v.rule)) continue;
-      for (const idx of v.indices) {
-        const existing = map.get(idx) ?? [];
-        existing.push(v.rule);
-        map.set(idx, existing);
-      }
-    }
-    return map;
+  const vMap = useMemo(() => {
+    const m = new Map<number, number[]>();
+    for (const v of violations) { if (!enabledRules.has(v.rule)) continue; for (const i of v.indices) { const e = m.get(i) ?? []; e.push(v.rule); m.set(i, e); } }
+    return m;
   }, [violations, enabledRules]);
 
-  // Prepare chart data
-  const data: ChartPoint[] = useMemo(() => {
-    return readings.map((r, i) => {
-      const point: ChartPoint = {
-        time: new Date(r.time_utc).getTime(),
-        timeLabel: r.time_utc,
-        value: r[metric] as number,
-      };
-      // Add violation scatter points for each rule
-      const rules = violationMap.get(i);
-      if (rules) {
-        for (const rule of rules) {
-          point[`violation_r${rule}`] = r[metric] as number;
-        }
-      }
-      return point;
-    });
-  }, [readings, metric, violationMap]);
+  const data: ChartPoint[] = useMemo(
+    () => readings.map((r, i) => {
+      const pt: ChartPoint = { time: new Date(r.time_utc).getTime(), value: r[metric] as number };
+      const rules = vMap.get(i);
+      if (rules) for (const rule of rules) pt[`v${rule}`] = r[metric] as number;
+      return pt;
+    }),
+    [readings, metric, vMap],
+  );
 
-  // Unique violated rules in data
-  const activeViolationRules = useMemo(() => {
-    const rules = new Set<number>();
-    for (const v of violations) {
-      if (enabledRules.has(v.rule) && v.indices.length > 0) {
-        rules.add(v.rule);
-      }
-    }
-    return Array.from(rules).sort();
+  const activeRules = useMemo(() => {
+    const s = new Set<number>();
+    for (const v of violations) if (enabledRules.has(v.rule) && v.indices.length) s.add(v.rule);
+    return Array.from(s).sort();
   }, [violations, enabledRules]);
 
-  const metricLabel = METRIC_LABELS[metric] ?? metric;
+  const label = METRIC_LABELS[metric] ?? metric;
 
-  const handleExportChart = useCallback(() => {
-    const svgEl = chartRef.current?.querySelector("svg");
-    if (!svgEl) return;
-    const svgData = new XMLSerializer().serializeToString(svgEl);
-    const blob = new Blob([svgData], { type: "image/svg+xml" });
-    const url = URL.createObjectURL(blob);
+  const exportSVG = useCallback(() => {
+    const svg = ref.current?.querySelector("svg");
+    if (!svg) return;
     const a = document.createElement("a");
-    a.href = url;
-    a.download = `spc_chart_${metric}.svg`;
+    a.href = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], { type: "image/svg+xml" }));
+    a.download = `chart_${metric}.svg`;
     a.click();
-    URL.revokeObjectURL(url);
+    URL.revokeObjectURL(a.href);
   }, [metric]);
 
-  if (readings.length === 0) {
-    return (
-      <div style={styles.empty}>
-        No data to display. Select a device and time range.
-      </div>
-    );
-  }
+  if (!readings.length)
+    return <div className="empty"><h3>No chart data</h3><p>Select a device and time range to see the control chart.</p></div>;
 
   return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <h3 style={styles.title}>{metricLabel} Control Chart</h3>
-        <button style={styles.exportBtn} onClick={handleExportChart}>
-          Export SVG
-        </button>
+    <div className="card">
+      <div className="card-head">
+        <span className="card-title">{label}</span>
+        <button className="btn btn-sm" onClick={exportSVG}>Export SVG</button>
       </div>
-      <div ref={chartRef} style={{ width: "100%", height: 420 }}>
+      <div ref={ref} className="chart-area">
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={data} margin={{ top: 10, right: 30, left: 10, bottom: 10 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#222" />
-            <XAxis
-              dataKey="time"
-              type="number"
-              domain={["dataMin", "dataMax"]}
-              scale="time"
+          <ComposedChart data={data} margin={mobile ? { top: 5, right: 8, left: -15, bottom: 5 } : { top: 10, right: 30, left: 5, bottom: 10 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke={GRID} />
+            <XAxis dataKey="time" type="number" domain={["dataMin","dataMax"]} scale="time"
               tickFormatter={(ts: number) => format(new Date(ts), "HH:mm")}
-              stroke="#555"
-              fontSize={11}
-            />
-            <YAxis
-              stroke="#555"
-              fontSize={11}
-              domain={["auto", "auto"]}
-              label={{
-                value: metricLabel,
-                angle: -90,
-                position: "insideLeft",
-                fill: "#888",
-                fontSize: 12,
-              }}
-            />
+              stroke="transparent" tick={{ fill: TICK, fontSize: mobile ? 10 : 11 }} />
+            <YAxis stroke="transparent" tick={{ fill: TICK, fontSize: mobile ? 10 : 11 }} width={mobile ? 38 : 55}
+              domain={["auto","auto"]}
+              label={mobile ? undefined : { value: label, angle: -90, position: "insideLeft", fill: TICK, fontSize: 12 }} />
             <Tooltip
-              contentStyle={{ background: "#1a1a1a", border: "1px solid #333", borderRadius: 6 }}
-              labelFormatter={(ts: number) => formatTimeFull(new Date(ts).toISOString())}
-              formatter={(val: number, name: string) => {
-                if (name === "value") return [val.toFixed(3), metricLabel];
-                return [val.toFixed(3), name];
-              }}
-            />
+              contentStyle={{ background: TIP_BG, border: `1px solid ${TIP_BD}`, borderRadius: 8, fontSize: 12, color: "#0f172a", boxShadow: "0 4px 12px rgba(0,0,0,0.08)" }}
+              labelFormatter={(ts: number) => { try { return format(new Date(ts), "yyyy-MM-dd HH:mm:ss"); } catch { return ""; } }}
+              formatter={(val: number, name: string) => name === "value" ? [val.toFixed(3), label] : [val.toFixed(3), name]} />
 
-            {/* Control limit reference lines */}
-            {controlLimits && (
-              <>
-                <ReferenceLine
-                  y={controlLimits.mean}
-                  stroke="#4ade80"
-                  strokeDasharray="8 4"
-                  label={{ value: "X\u0304", position: "right", fill: "#4ade80", fontSize: 11 }}
-                />
-                <ReferenceLine y={controlLimits.ucl_1sigma} stroke="#facc15" strokeDasharray="4 4" strokeOpacity={0.5} />
-                <ReferenceLine y={controlLimits.lcl_1sigma} stroke="#facc15" strokeDasharray="4 4" strokeOpacity={0.5} />
-                <ReferenceLine
-                  y={controlLimits.ucl_2sigma}
-                  stroke="#fb923c"
-                  strokeDasharray="4 4"
-                  strokeOpacity={0.6}
-                  label={{ value: "+2\u03c3", position: "right", fill: "#fb923c", fontSize: 10 }}
-                />
-                <ReferenceLine
-                  y={controlLimits.lcl_2sigma}
-                  stroke="#fb923c"
-                  strokeDasharray="4 4"
-                  strokeOpacity={0.6}
-                  label={{ value: "-2\u03c3", position: "right", fill: "#fb923c", fontSize: 10 }}
-                />
-                <ReferenceLine
-                  y={controlLimits.ucl_3sigma}
-                  stroke="#ef4444"
-                  strokeDasharray="6 3"
-                  label={{ value: "UCL", position: "right", fill: "#ef4444", fontSize: 11 }}
-                />
-                <ReferenceLine
-                  y={controlLimits.lcl_3sigma}
-                  stroke="#ef4444"
-                  strokeDasharray="6 3"
-                  label={{ value: "LCL", position: "right", fill: "#ef4444", fontSize: 11 }}
-                />
-              </>
-            )}
+            {controlLimits && <>
+              <ReferenceLine y={controlLimits.mean} stroke="#16a34a" strokeDasharray="8 4"
+                label={mobile ? undefined : { value: "X\u0304", position: "right", fill: "#16a34a", fontSize: 11 }} />
+              <ReferenceLine y={controlLimits.ucl_1sigma} stroke="#ca8a04" strokeDasharray="4 4" strokeOpacity={0.4} />
+              <ReferenceLine y={controlLimits.lcl_1sigma} stroke="#ca8a04" strokeDasharray="4 4" strokeOpacity={0.4} />
+              <ReferenceLine y={controlLimits.ucl_2sigma} stroke="#ea580c" strokeDasharray="4 4" strokeOpacity={0.5}
+                label={mobile ? undefined : { value: "+2\u03c3", position: "right", fill: "#ea580c", fontSize: 10 }} />
+              <ReferenceLine y={controlLimits.lcl_2sigma} stroke="#ea580c" strokeDasharray="4 4" strokeOpacity={0.5}
+                label={mobile ? undefined : { value: "-2\u03c3", position: "right", fill: "#ea580c", fontSize: 10 }} />
+              <ReferenceLine y={controlLimits.ucl_3sigma} stroke="#dc2626" strokeDasharray="6 3"
+                label={mobile ? undefined : { value: "UCL", position: "right", fill: "#dc2626", fontSize: 11 }} />
+              <ReferenceLine y={controlLimits.lcl_3sigma} stroke="#dc2626" strokeDasharray="6 3"
+                label={mobile ? undefined : { value: "LCL", position: "right", fill: "#dc2626", fontSize: 11 }} />
+            </>}
 
-            {/* Main data line */}
-            <Line
-              type="monotone"
-              dataKey="value"
-              stroke="#818cf8"
-              strokeWidth={1.5}
-              dot={false}
-              isAnimationActive={false}
-            />
-
-            {/* Violation scatter markers */}
-            {activeViolationRules.map((rule) => (
-              <Scatter
-                key={`viol-${rule}`}
-                dataKey={`violation_r${rule}`}
-                fill={NELSON_RULE_COLORS[rule]}
-                shape="diamond"
-                isAnimationActive={false}
-              />
-            ))}
-
-            {/* Brush for zoom/pan */}
-            <Brush
-              dataKey="time"
-              height={24}
-              stroke="#7c3aed"
-              fill="#0f0f0f"
-              tickFormatter={(ts: number) => format(new Date(ts), "HH:mm")}
-            />
+            <Line type="monotone" dataKey="value" stroke="#4f46e5" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+            {activeRules.map((r) => <Scatter key={r} dataKey={`v${r}`} fill={NELSON_RULE_COLORS[r]} shape="diamond" isAnimationActive={false} />)}
+            {!mobile && <Brush dataKey="time" height={22} stroke="#881337" fill="#f8fafc" tickFormatter={(ts: number) => format(new Date(ts), "HH:mm")} />}
           </ComposedChart>
         </ResponsiveContainer>
       </div>
-
-      {/* Summary stats */}
       {controlLimits && (
-        <div style={styles.stats}>
-          <Stat label="Mean" value={controlLimits.mean.toFixed(3)} />
-          <Stat label="\u03c3" value={controlLimits.sigma.toFixed(4)} />
-          <Stat label="UCL (3\u03c3)" value={controlLimits.ucl_3sigma.toFixed(3)} color="#ef4444" />
-          <Stat label="LCL (3\u03c3)" value={controlLimits.lcl_3sigma.toFixed(3)} color="#ef4444" />
-          <Stat label="Points" value={readings.length.toString()} />
+        <div className="stats-strip">
+          <S l="Mean" v={controlLimits.mean.toFixed(3)} />
+          <S l={"\u03c3"} v={controlLimits.sigma.toFixed(4)} />
+          <S l="UCL" v={controlLimits.ucl_3sigma.toFixed(3)} c="#dc2626" />
+          <S l="LCL" v={controlLimits.lcl_3sigma.toFixed(3)} c="#dc2626" />
+          <S l="Points" v={readings.length.toLocaleString()} />
         </div>
       )}
     </div>
   );
 }
 
-function Stat({ label, value, color }: { label: string; value: string; color?: string }) {
-  return (
-    <div style={styles.stat}>
-      <span style={styles.statLabel}>{label}</span>
-      <span style={{ ...styles.statValue, color: color ?? "#e0e0e0" }}>{value}</span>
-    </div>
-  );
+function S({ l, v, c }: { l: string; v: string; c?: string }) {
+  return <div className="stat"><span className="stat-label">{l}</span><span className="stat-val" style={c ? { color: c } : undefined}>{v}</span></div>;
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    background: "#141414",
-    border: "1px solid #222",
-    borderRadius: 8,
-    padding: 16,
-  },
-  header: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 12,
-  },
-  title: { fontSize: 16, fontWeight: 600, color: "#e0e0e0" },
-  exportBtn: {
-    padding: "5px 12px",
-    background: "#1a1a1a",
-    color: "#ccc",
-    border: "1px solid #333",
-    borderRadius: 6,
-    cursor: "pointer",
-    fontSize: 12,
-  },
-  empty: {
-    background: "#141414",
-    border: "1px solid #222",
-    borderRadius: 8,
-    padding: 40,
-    textAlign: "center",
-    color: "#666",
-  },
-  stats: {
-    display: "flex",
-    gap: 24,
-    marginTop: 12,
-    flexWrap: "wrap",
-  },
-  stat: {
-    display: "flex",
-    flexDirection: "column",
-    gap: 2,
-  },
-  statLabel: { fontSize: 11, color: "#888", textTransform: "uppercase", letterSpacing: 1 },
-  statValue: { fontSize: 16, fontWeight: 600, fontFamily: "monospace" },
-};
